@@ -10,6 +10,7 @@
 #include "gen-cpp/NoteStore_types.h"
 #include "gen-cpp/UserStore.h"
 #include "gen-cpp/UserStore_constants.h"
+#include "tinyxml2.h"
 
 #include <cstdio>
 #include <cstring>
@@ -23,6 +24,7 @@ using namespace apache::thrift::transport;
 using namespace apache::thrift::stdcxx;
 using namespace evernote::edam;
 using namespace std;
+using namespace tinyxml2;
 
 /* Sandbox: https://sandbox.evernote.com/
  * Evernote International 产品环境： https://www.evernote.com/
@@ -35,13 +37,21 @@ using namespace std;
 #define HOST_EVERNOTE_SANDBOX "sandbox.evernote.com"
 #define HOST_YINXIANG_SANDBOX "sandbox.yinxiang.com"
 
-const char *g_BaseUrl = HOST_YINXIANG_SANDBOX;
+const char *g_BaseUrl = "put your host url here";
 const char *g_AuthToken = "put your dev token here";
 
-int readUpdateCount(void);
-void writeUpdateCount(int);
+XMLDocument *EvernoteXMLDataBaseInit(void);
+int32_t getUpdateCount(XMLDocument *);
+int32_t setUpdateCount(XMLDocument *, int32_t value);
+int32_t updateNotebooks(XMLDocument *, vector<Notebook> &, vector<string> &);
+int32_t updateNotes(XMLDocument *, vector<Note> &, vector<string> &);
+void closeXMLDataBase(XMLDocument *);
 
 int main() {
+    if (string(g_BaseUrl) == "put your host url here") {
+        cerr << "Invalid host url, exit!!!" << endl;
+        return -1;
+    }
     if (string(g_AuthToken) == "put your dev token here") {
         cerr << "Invalid Token, exit!!!" << endl;
         return -1;
@@ -127,20 +137,42 @@ int main() {
 
         cout << "list notebooks         : ";
         for (auto i = notebooks.begin(); i != notebooks.end(); i++)
-            cout << " <<" << i->name << ">> ";
+            cout << "<<" << i->name << ">> ";
         cout << endl;
 
         cout << "list tags              : ";
         for (auto i = tags.begin(); i != tags.end(); i++)
-            cout << " \"" << i->name << "\" ";
+            cout << "\"" << i->name << "\" ";
         cout << endl;
     } catch (TException &tx) {
         cout << "NoteStore ERROR: " << tx.what() << endl;
         return -1;
     }
 
+    /* open XML database before sync, we use a XML file to store Evernote
+     * meta data of notes and notebooks, real note contents and resources
+     * are not stored by XML, they will be stored as files at local. A
+     * sample XML database will look like this:
+     *   <?xml version="1.0" encoding="UTF-8" standalone="no"?>
+     *   <db-evernote>
+     *       <updateCount>186</updateCount>
+     *       <notebooks>
+     *           <notebook1>
+     *               <note1>...</note1>
+     *               <note2>...</note2>
+     *               ...
+     *           </notebook1>
+     *           ...
+     *       </notebooks>
+     *   </db-evernote> */
+    XMLDocument *db = EvernoteXMLDataBaseInit();
+    if (!db) {
+        cerr << "open XML database failed" << endl;
+        throw TException("XML database error!");
+    }
+
     /* sync notes and notebooks from Evernote service */
-    cout << "\nStart Synchronizing form server..." << endl;
+    cout << "\nStart Synchronizing from server..." << endl;
     SyncState syncState;
     SyncChunkFilter filter;
     vector<SyncChunk> chunks;
@@ -149,7 +181,7 @@ int main() {
         const int32_t maxEntries = 10;
 
         /*for incremental sync, read afterUSN from stored file*/
-        int32_t afterUSN = readUpdateCount();
+        int32_t afterUSN = getUpdateCount(db);
         cout << "lastUpdateCount: " << afterUSN << endl;
 
         noteStore.getSyncState(syncState, g_AuthToken);
@@ -208,22 +240,25 @@ int main() {
         for (auto i = notes.begin(); i != notes.end(); i++)
             cout << "\t" << i->title << endl;
 
-        cout << "expunged notebooks guids: " << endl;
+        cout << "expunged notebook guids: " << endl;
         for (auto i = expungedNotebooks.begin(); i != expungedNotebooks.end();
              i++)
             cout << "\t<<" << *i << ">>" << endl;
 
-        cout << "expunged notes: " << endl;
+        cout << "expunged note guids: " << endl;
         for (auto i = expungedNotes.begin(); i != expungedNotes.end(); i++)
             cout << "\t<<" << *i << ">>" << endl;
 
         /* rebuild server status corresponding to the changes. */
-        // todo...
+        updateNotebooks(db, notebooks, expungedNotebooks);
+        updateNotes(db, notes, expungedNotes);
 
         /* for incremental sync, store afterUSN so next time we can
          * know from which point to start sync
          */
-        writeUpdateCount(afterUSN);
+        setUpdateCount(db, afterUSN);
+        closeXMLDataBase(db);
+
     } catch (TException &tx) {
         cout << "NoteStore ERROR: " << tx.what() << endl;
     }
@@ -231,26 +266,190 @@ int main() {
     return 0;
 }
 
-int32_t readUpdateCount(void) {
-    int value = 0;
-    char tmp[20] = {0};
+/* On success, return a valid pointer of XML database, othrewise return NULL,
+ * valid XML database must include a declaration and a db-evernote root
+ * element */
+XMLDocument *EvernoteXMLDataBaseInit(void) {
+    XMLDocument *db = new XMLDocument();
+    if (db) {
+        if (db->LoadFile("./evernote-data/db.xml") == XML_SUCCESS) {
+            XMLElement *root = db->RootElement();
+            if (root && string("db-evernote") == root->Name()) {
+                cout << "open XML database success." << endl;
+                return db;
+            }
+        }
 
-    FILE *file = fopen("./evernote-data/updateCount.txt", "r");
-    if (file) {
-        fread(tmp, 1, sizeof(tmp), file);
-        sscanf(tmp, "%d", &value);
-        fclose(file);
+        /* if load file failed, assume there is no db exists, create a new
+         * one and add a db-evernote root element*/
+        cout << "open XML database failed, create a new one." << endl;
+        const char *declaration =
+            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>";
+        db->Parse(declaration);
+        XMLElement *root = db->NewElement("db-evernote");
+        db->InsertEndChild(root);
+        return db;
     }
-    return value;
+
+    return NULL;
 }
 
-void writeUpdateCount(int32_t value) {
-    char tmp[20] = {0};
-
-    sprintf(tmp, "%d", value);
-    FILE *file = fopen("./evernote-data/updateCount.txt", "w+");
-    if (file) {
-        fwrite(tmp, 1, strlen(tmp), file);
-        fclose(file);
+/* On success, return the updateCount value, otherwise return 0*/
+int32_t getUpdateCount(XMLDocument *db) {
+    if (db) {
+        XMLElement *root = db->RootElement();
+        XMLElement *node = root->FirstChildElement("updateCount");
+        if (node) {
+            int32_t value;
+            if (node->QueryIntText(&value) == XML_SUCCESS) {
+                return value;
+            }
+        }
     }
+
+    return 0;
+}
+
+/* On success, create an updateCount node under root node and set value text,
+ * otherwise return -1*/
+int32_t setUpdateCount(XMLDocument *db, int32_t value) {
+    if (db) {
+        XMLElement *root = db->RootElement();
+        XMLElement *node = root->FirstChildElement("updateCount");
+        if (node) {
+            node->SetText(to_string(value).c_str());
+            return 0;
+        } else {
+            node = db->NewElement("updateCount");
+            node->SetText(to_string(value).c_str());
+            root->InsertFirstChild(node);
+        }
+    }
+
+    return -1;
+}
+
+int32_t updateNotebooks(XMLDocument *db, vector<Notebook> &notebooks,
+                        vector<string> &guids) {
+    if (!db)
+        return -1;
+
+    XMLElement *e;
+    XMLElement *root = db->RootElement();
+    XMLElement *eleNotebooks = root->FirstChildElement("notebooks");
+    if (!eleNotebooks) {
+        eleNotebooks = db->NewElement("notebooks");
+        root->InsertEndChild(eleNotebooks);
+    }
+
+    /* check all the server returned updated notebooks, these notebooks
+     * should be updated to local database. */
+    for (auto i = notebooks.begin(); i != notebooks.end(); i++) {
+        e = eleNotebooks->FirstChildElement();
+        for (; e && e->Attribute("guid") != i->guid;
+             e = e->NextSiblingElement())
+            ;
+
+        if (e && e->Attribute("guid") == i->guid) { /* found */
+            cout << "update notebook: " << i->guid << ": ";
+            cout << "<<" << e->Attribute("name") << ">> "
+                 << "==> ";
+            cout << "<<" << i->name << ">>" << endl;
+            ;
+            e->SetAttribute("name", i->name.c_str());
+            e->SetAttribute("guid", i->guid.c_str());
+        } else { /* not found, create a new one */
+            cout << "create new notebook: "
+                 << "<<" << i->name << ">>: ";
+            cout << i->guid << endl;
+            e = db->NewElement("notebook");
+            e->SetAttribute("name", i->name.c_str());
+            e->SetAttribute("guid", i->guid.c_str());
+            eleNotebooks->InsertEndChild(e);
+        }
+    }
+
+    /* delete all the server returned expunged notebooks. */
+    for (auto i = guids.begin(); i != guids.end(); i++) {
+        e = eleNotebooks->FirstChildElement();
+        for (; e && e->Attribute("guid") != (*i); e = e->NextSiblingElement())
+            ;
+
+        if (e && e->Attribute("guid") == *i) {
+            cout << "delete notebook: " << *i << endl;
+            eleNotebooks->DeleteChild(e);
+        }
+    }
+
+    return 0;
+}
+
+int32_t updateNotes(XMLDocument *db, vector<Note> &notes,
+                    vector<string> &guids) {
+    if (!db)
+        return -1;
+
+    /* Since in this program the notebooks were updated first, so we
+     * will assume that we can always find the specific notebook that
+     * a note belongs to in XML database. */
+    XMLElement *e1, *e2;
+    XMLElement *root = db->RootElement();
+    XMLElement *eleNotebooks = root->FirstChildElement("notebooks");
+
+    /* check all the updated notes, these notes should be updated to
+     * local XML database. Note that trashed notes will not be removed,
+     * compare to the normal note, the only difference for trashed note
+     * is the active filed is set to false. */
+    for (auto i = notes.begin(); i != notes.end(); i++) {
+        // find the notebooks for the note
+        for (e1 = eleNotebooks->FirstChildElement();
+             e1 && e1->Attribute("guid") != i->notebookGuid;
+             e1 = e1->NextSiblingElement())
+            ;
+
+        if (!e1) { /* not likely to happen, just print a warning message */
+            cerr << " WARNING: found an orphan note: " << i->title << endl;
+        } else {
+            // find the note, if not, create a new one
+            for (e2 = e1->FirstChildElement();
+                 e2 && e2->Attribute("guid") != i->guid;
+                 e2 = e2->NextSiblingElement())
+                ;
+
+            if (e2) { /* update the note */
+                cout << "update note: " << i->title << endl;
+                e2->SetAttribute("title", i->title.c_str());
+                e2->SetAttribute("guid", i->guid.c_str());
+                e2->SetAttribute("active", i->active ? "true" : "false");
+            } else { /* create a new note in this notebook */
+                cout << "create new note: " << i->title << endl;
+                e2 = db->NewElement("note");
+                e2->SetAttribute("title", i->title.c_str());
+                e2->SetAttribute("guid", i->guid.c_str());
+                e2->SetAttribute("active", i->active ? "true" : "false");
+                e1->InsertEndChild(e2);
+            }
+        }
+    }
+
+    /* check all the expunged notes, these notes should be remove from
+     * local XML database. */
+    for (auto i = guids.begin(); i != guids.end(); i++) {
+        for (e1 = eleNotebooks->FirstChildElement(); e1 != NULL;
+             e1 = e1->NextSiblingElement()) {
+            for (e2 = e1->FirstChildElement(); e2 != NULL;
+                 e2 = e2->NextSiblingElement()) {
+                if (e2->Attribute("guid") == (*i)) {
+                    cout << "delete note: " << (*i) << endl;
+                    e1->DeleteChild(e2);
+                }
+            }
+        }
+    }
+
+    return 0;
+}
+
+void closeXMLDataBase(XMLDocument *db) {
+    db->SaveFile("./evernote-data/db.xml");
 }

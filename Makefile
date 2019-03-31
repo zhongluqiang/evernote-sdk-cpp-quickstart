@@ -12,7 +12,7 @@ VPATH=./ ./gen-cpp
 SRC_COMM = $(notdir $(wildcard gen-cpp/*.cpp))
 SRC_NOTESTORE_SERVER_SKELETON = $(SRC_COMM) NoteStore_server.skeleton.cpp
 SRC_USERSTORE_SERVER_SKELETON = $(SRC_COMM) UserStore_server.skeleton.cpp
-SRC_EVERNOTECLIENT = $(SRC_COMM) EvernoteClient.cpp
+SRC_EVERNOTECLIENT = $(SRC_COMM) EvernoteClient.cpp tinyxml2.cpp
 
 OBJS_NOTESTORE_SERVER_SKELETON = $(SRC_NOTESTORE_SERVER_SKELETON:%.cpp=$(OBJS_DIR)/%.o)
 OBJS_USERSTORE_SERVER_SKELETON = $(SRC_USERSTORE_SERVER_SKELETON:%.cpp=$(OBJS_DIR)/%.o)
