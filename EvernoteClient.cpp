@@ -14,9 +14,15 @@
 
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
+
+#include <stdlib.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
 
 using namespace apache::thrift;
 using namespace apache::thrift::protocol;
@@ -40,12 +46,15 @@ using namespace tinyxml2;
 const char *g_BaseUrl = "put your host url here";
 const char *g_AuthToken = "put your dev token here";
 
+const string g_DataDir("./evernote-data/");
 XMLDocument *EvernoteXMLDataBaseInit(void);
 int32_t getUpdateCount(XMLDocument *);
 int32_t setUpdateCount(XMLDocument *, int32_t value);
 int32_t updateNotebooks(XMLDocument *, vector<Notebook> &, vector<string> &);
-int32_t updateNotes(XMLDocument *, vector<Note> &, vector<string> &);
+int32_t updateNotes(NoteStoreClient &, XMLDocument *, vector<Note> &,
+                    vector<string> &);
 void closeXMLDataBase(XMLDocument *);
+int32_t saveNote(const string &, Note &);
 
 int main() {
     if (string(g_BaseUrl) == "put your host url here") {
@@ -251,7 +260,7 @@ int main() {
 
         /* rebuild server status corresponding to the changes. */
         updateNotebooks(db, notebooks, expungedNotebooks);
-        updateNotes(db, notes, expungedNotes);
+        updateNotes(noteStore, db, notes, expungedNotes);
 
         /* for incremental sync, store afterUSN so next time we can
          * know from which point to start sync
@@ -356,6 +365,11 @@ int32_t updateNotebooks(XMLDocument *db, vector<Notebook> &notebooks,
                  << "==> ";
             cout << "<<" << i->name << ">>" << endl;
             ;
+
+            /* rename notebook directory */
+            rename((g_DataDir + e->Attribute("name")).c_str(),
+                   (g_DataDir + i->name).c_str());
+
             e->SetAttribute("name", i->name.c_str());
             e->SetAttribute("guid", i->guid.c_str());
         } else { /* not found, create a new one */
@@ -366,6 +380,9 @@ int32_t updateNotebooks(XMLDocument *db, vector<Notebook> &notebooks,
             e->SetAttribute("name", i->name.c_str());
             e->SetAttribute("guid", i->guid.c_str());
             eleNotebooks->InsertEndChild(e);
+            /* create a directory for notebook */
+            mkdir((g_DataDir + i->name).c_str(),
+                  S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH);
         }
     }
 
@@ -376,7 +393,17 @@ int32_t updateNotebooks(XMLDocument *db, vector<Notebook> &notebooks,
             ;
 
         if (e && e->Attribute("guid") == *i) {
-            cout << "delete notebook: " << *i << endl;
+            cout << "delete notebook: "
+                 << "<<" << e->Attribute("name") << ">>:" << *i << endl;
+
+            /* delete notebook directory, must do before DeleteChild(),
+             * or segmentation fault could occour due to the memory
+             * free action of DeleteChild().
+             * use "rm -fr" is dangerous, we will fix it later by creating
+             * a removeDir() function. */
+            system(("rm -fr " + g_DataDir + e->Attribute("name")).c_str());
+
+            /* now we can delete the child element and free memeory */
             eleNotebooks->DeleteChild(e);
         }
     }
@@ -384,8 +411,8 @@ int32_t updateNotebooks(XMLDocument *db, vector<Notebook> &notebooks,
     return 0;
 }
 
-int32_t updateNotes(XMLDocument *db, vector<Note> &notes,
-                    vector<string> &guids) {
+int32_t updateNotes(NoteStoreClient &noteStore, XMLDocument *db,
+                    vector<Note> &notes, vector<string> &guids) {
     if (!db)
         return -1;
 
@@ -395,6 +422,7 @@ int32_t updateNotes(XMLDocument *db, vector<Note> &notes,
     XMLElement *e1, *e2;
     XMLElement *root = db->RootElement();
     XMLElement *eleNotebooks = root->FirstChildElement("notebooks");
+    Note note;
 
     /* check all the updated notes, these notes should be updated to
      * local XML database. Note that trashed notes will not be removed,
@@ -418,6 +446,16 @@ int32_t updateNotes(XMLDocument *db, vector<Note> &notes,
 
             if (e2) { /* update the note */
                 cout << "update note: " << i->title << endl;
+
+                /* delete old note on the disk*/
+                remove((g_DataDir + e1->Attribute("name") + "/" +
+                        e2->Attribute("title") + ".enml")
+                           .c_str());
+                /* save note, with .enml suffix */
+                noteStore.getNote(note, g_AuthToken, i->guid, true, false,
+                                  false, false);
+                saveNote(g_DataDir + e1->Attribute("name"), note);
+
                 e2->SetAttribute("title", i->title.c_str());
                 e2->SetAttribute("guid", i->guid.c_str());
                 e2->SetAttribute("active", i->active ? "true" : "false");
@@ -427,6 +465,12 @@ int32_t updateNotes(XMLDocument *db, vector<Note> &notes,
                 e2->SetAttribute("title", i->title.c_str());
                 e2->SetAttribute("guid", i->guid.c_str());
                 e2->SetAttribute("active", i->active ? "true" : "false");
+
+                /* save note, with .enml suffix */
+                noteStore.getNote(note, g_AuthToken, i->guid, true, false,
+                                  false, false);
+                saveNote(g_DataDir + e1->Attribute("name"), note);
+
                 e1->InsertEndChild(e2);
             }
         }
@@ -441,6 +485,12 @@ int32_t updateNotes(XMLDocument *db, vector<Note> &notes,
                  e2 = e2->NextSiblingElement()) {
                 if (e2->Attribute("guid") == (*i)) {
                     cout << "delete note: " << (*i) << endl;
+
+                    /* perform remove() before free element memory. */
+                    remove((g_DataDir + e1->Attribute("name") + "/" +
+                            e2->Attribute("title") + ".enml")
+                               .c_str());
+
                     e1->DeleteChild(e2);
                 }
             }
@@ -452,4 +502,17 @@ int32_t updateNotes(XMLDocument *db, vector<Note> &notes,
 
 void closeXMLDataBase(XMLDocument *db) {
     db->SaveFile("./evernote-data/db.xml");
+}
+
+int32_t saveNote(const string &location, Note &note) {
+    string filename = location + "/" + note.title + ".enml";
+    ofstream file(filename);
+    if (file) {
+        file << note.content;
+        file.close();
+        return 0;
+    } else {
+        cerr << "create file " << filename << " failed!" << endl;
+        return -1;
+    }
 }
