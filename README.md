@@ -1,4 +1,4 @@
-# evernote-sdk-cpp-quickstartenviroment
+# evernote-sdk-cpp-quickstart
 Evernote C++ SDK quick start demo which features simple but comprehensive utilization for Evernote C++ SDK APIs.
 
 ## Features
