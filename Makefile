@@ -1,7 +1,7 @@
 OBJS_DIR = objs_tmp
 CPPFLAGS = -std=c++11
 CPPFLAGS += -MMD -MP
-LDFLAGS = -lthrift 
+LDFLAGS = -lthrift -lboost_system -lboost_filesystem
 
 # add -I and -L if headers or libs are not installed in system path
 # CPPFLAGS += -I"your include path"
@@ -12,7 +12,8 @@ VPATH=./ ./gen-cpp
 SRC_COMM = $(notdir $(wildcard gen-cpp/*.cpp))
 SRC_NOTESTORE_SERVER_SKELETON = $(SRC_COMM) NoteStore_server.skeleton.cpp
 SRC_USERSTORE_SERVER_SKELETON = $(SRC_COMM) UserStore_server.skeleton.cpp
-SRC_EVERNOTECLIENT = $(SRC_COMM) EvernoteClient.cpp tinyxml2.cpp
+SRC_EVERNOTECLIENT = $(SRC_COMM) EvernoteClient.cpp tinyxml2.cpp Database.cpp \
+	filesystem.cpp xmlUtil.cpp enml2html.cpp
 
 OBJS_NOTESTORE_SERVER_SKELETON = $(SRC_NOTESTORE_SERVER_SKELETON:%.cpp=$(OBJS_DIR)/%.o)
 OBJS_USERSTORE_SERVER_SKELETON = $(SRC_USERSTORE_SERVER_SKELETON:%.cpp=$(OBJS_DIR)/%.o)
@@ -58,9 +59,15 @@ gencpp:
 clean:
 	rm userstore_skeleton notestore_skeleton client \
 	   $(OBJS_DIR)/NoteStore_server.skeleton.* $(OBJS_DIR)/UserStore_server.skeleton.* \
-	   $(OBJS_DIR)/EvernoteClient.* -fr
+	   $(OBJS_DIR)/EvernoteClient.* -fr \
+	   $(OBJS_DIR)/tinyxml2.* -fr \
+	   $(OBJS_DIR)/xmlUtil.* -fr
 cleandata:
-	rm evernote-data/* -fr
+	rm ./evernote-data/notebooks/* -fr
+	rm ./evernote-data/notes/* -fr
+	rm ./evernote-data/tags/* -fr
+	rm ./evernote-data/export/* -fr
+	rm ./evernote-data/variable.txt -fr
 distclean: clean cleandata
 	rm $(OBJS_DIR) -fr
 
